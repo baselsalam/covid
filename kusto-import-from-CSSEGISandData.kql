@@ -1,0 +1,38 @@
+// The Johns Hopkins dataset has had the schema change a few times.
+// We first need to run a query to enumerate the schema, so we can tweak the processing to deal with it
+// The schema change involved: columns moving around, columns being added to the end, and the beginning.
+// In addition, the same column (Province) was used to report different facts, so we need to clean this up too.
+
+// Step 1 - print out query to figure out format of each data file
+range Date from datetime(2020-01-22) to bin(now(),1d) step 1d
+| extend union_clause=strcat('(externaldata(header:string)[h@"https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_daily_reports/',format_datetime(Date,'MM-dd-yyyy'),'.csv"] with (format=txt) | limit 1 | extend Date=datetime(',Date,'))')
+| summarize union_clauses=make_list(union_clause)
+| project union_statement=strcat('union\n ',strcat_array(union_clauses,'\n,'),'\n| order by Date asc')
+
+// Step 2: run output of query above to ensure the schema of new days looks consistent as the last day we have processed
+
+// Step3.1: use output of query above to see if any schema definition below needs to be changed.
+// Step3.2: run query below to generate the source of hte ingestion query.
+range Date from datetime(2020-01-22) to bin(now(),1d) step 1d
+// run query above to check schema
+| extend schema=case(Date < datetime(2020-03-01), 'Province:string,Country:string,LastUpdate:datetime,Confirmed:long,Deaths:long,Recovered:long'
+                    ,Date < datetime(2020-03-22), 'Province:string,Country:string,LastUpdate:datetime,Confirmed:long,Deaths:long,Recovered:long,Latitude:real,Longitude:real'
+                    ,                             'FIPS:long,Admin2:string,Province:string,Country:string,LastUpdate:datetime,Latitude:real,Longitude:real,Confirmed:long,Deaths:long,Recovered:long,Active:long'
+                    )
+| extend union_clause=strcat('(externaldata(',schema,')[h@"https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_daily_reports/',format_datetime(Date,'MM-dd-yyyy'),'.csv"] with (format=csv, ignoreFirstRecord=true) | extend DataFileDate=datetime(',Date,'))')
+| summarize union_clauses=make_list(union_clause)
+| project union_statement=strcat('union\n ',strcat_array(union_clauses,'\n,'),'\n| order by DataFileDate asc')
+
+// Step4: Ingest the data
+.set-or-replace Covid_csse_daily_reports_consolidated <|
+// insert the output of query above here
+
+// Step5: clean up province column
+.set-or-replace Covid_csse_daily_reports_consolidated_cleaned <|
+let StateMappings=datatable(StateName:string, StateShortCode:string) ['Alabama','AL', 'Alaska','AK', 'Arizona','AZ', 'Arkansas','AR', 'California','CA', 'Colorado','CO', 'Connecticut','CT', 'Delaware','DE', 'Florida','FL', 'Georgia','GA', 'Hawaii','HI', 'Idaho','ID', 'Illinois','IL', 'Indiana','IN', 'Iowa','IA', 'Kansas','KS', 'Kentucky','KY', 'Louisiana','LA', 'Maine','ME', 'Maryland','MD', 'Massachusetts','MA', 'Michigan','MI', 'Minnesota','MN', 'Mississippi','MS', 'Missouri','MO', 'Montana','MT', 'Nebraska','NE', 'Nevada','NV', 'New Hampshire','NH', 'New Jersey','NJ', 'New Mexico','NM', 'New York','NY', 'North Carolina','NC', 'North Dakota','ND', 'Ohio','OH', 'Oklahoma','OK', 'Oregon','OR', 'Pennsylvania','PA', 'Rhode Island','RI', 'South Carolina','SC', 'South Dakota','SD', 'Tennessee','TN', 'Texas','TX', 'Utah','UT', 'Vermont','VT', 'Virginia','VA', 'Washington','WA', 'West Virginia','WV', 'Wisconsin','WI', 'Wyoming','WY'];
+Covid_csse_daily_reports_consolidated
+// patch up province
+| extend Province_StateShortCode=iif(Country=='US' and Province contains ', ',replace(@'.*, ([A-Z][A-Z])',@'\1',Province),'')
+| lookup kind=leftouter StateMappings on $left.Province_StateShortCode==$right.StateShortCode
+| extend Province=iif(Country=='US',coalesce(StateName,Province),Province)
+| project-away Province_StateShortCode, StateName
